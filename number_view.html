@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reconocedor de Dígitos Escritos a Mano</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+        text-align: center;
+      }
+      .container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+      }
+      .webcam-container {
+        position: relative;
+      }
+      #webcam {
+        border: 2px solid #333;
+        border-radius: 5px;
+      }
+      #canvas-input {
+        border: 1px solid #ccc;
+        display: block;
+        margin: 10px auto;
+      }
+      #canvas-processed {
+        border: 1px solid #ccc;
+        margin-top: 10px;
+        background-color: black;
+        display: block;
+      }
+      .controls {
+        margin: 15px 0;
+      }
+      button {
+        padding: 8px 16px;
+        background-color: #4285f4;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        margin: 0 5px;
+      }
+      button:hover {
+        background-color: #3367d6;
+      }
+      button:disabled {
+        background-color: #cccccc;
+        cursor: not-allowed;
+      }
+      .result {
+        font-size: 24px;
+        font-weight: bold;
+        margin: 20px 0;
+      }
+      .prediction-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        margin-top: 20px;
+      }
+      .prediction-bar {
+        display: flex;
+        width: 100%;
+        max-width: 500px;
+        height: 30px;
+        margin-bottom: 10px;
+      }
+      .digit-label {
+        width: 30px;
+        text-align: center;
+        line-height: 30px;
+        background-color: #f1f1f1;
+      }
+      .probability-bar {
+        flex-grow: 1;
+        background-color: #e0e0e0;
+        position: relative;
+      }
+      .probability-fill {
+        height: 100%;
+        background-color: #4285f4;
+        width: 0%;
+        transition: width 0.3s ease;
+      }
+      .probability-value {
+        position: absolute;
+        right: 5px;
+        top: 5px;
+        font-size: 14px;
+      }
+      .status {
+        color: #666;
+        font-style: italic;
+        margin-bottom: 10px;
+      }
+      .settings {
+        margin: 15px 0;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        background-color: #f9f9f9;
+      }
+      .slider-container {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 10px 0;
+      }
+      .slider-container label {
+        margin-right: 10px;
+        width: 120px;
+        text-align: right;
+      }
+      .slider-container input {
+        margin-right: 10px;
+      }
+      .slider-value {
+        width: 40px;
+        text-align: left;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Reconocedor de Dígitos Escritos a Mano</h1>
+    <p>
+      Esta aplicación utiliza la webcam para detectar y reconocer dígitos
+      escritos a mano.
+    </p>
+
+    <div class="container">
+      <div class="webcam-container">
+        <video
+          id="webcam"
+          width="400"
+          height="300"
+          autoplay
+          playsinline
+        ></video>
+      </div>
+
+      <div class="controls">
+        <button id="start-webcam">Iniciar Webcam</button>
+        <button id="capture">Capturar</button>
+        <button id="predict" disabled>Predecir</button>
+      </div>
+
+      <div class="settings">
+        <h3>Configuración de procesamiento</h3>
+        <div class="slider-container">
+          <label for="threshold">Umbral:</label>
+          <input type="range" id="threshold" min="0" max="254" value="30" />
+          <span id="threshold-value" class="slider-value">30</span>
+        </div>
+        <div class="slider-container">
+          <label for="invert">Invertir:</label>
+          <input type="checkbox" id="invert" checked />
+        </div>
+        <button id="apply-settings">Aplicar y Reprocesar</button>
+      </div>
+
+      <div>
+        <p class="status" id="status-message">
+          Estado: Esperando iniciar la webcam
+        </p>
+        <h3>Imagen capturada</h3>
+        <canvas id="canvas-input" width="200" height="150"></canvas>
+
+        <h3>Imagen procesada (28x28)</h3>
+        <canvas id="canvas-processed" width="140" height="140"></canvas>
+      </div>
+
+      <div class="result">
+        <div id="result-text">Resultado: -</div>
+      </div>
+
+      <div class="prediction-container">
+        <h3>Probabilidades de predicción</h3>
+        <div id="prediction-bars"></div>
+      </div>
+    </div>
+
+    <!-- Import TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.0.0/dist/tf.min.js"></script>
+
+    <script>
+      // Variables globales
+      let model;
+      let streaming = false;
+      let video = document.getElementById("webcam");
+      let canvasInput = document.getElementById("canvas-input"); // Lienzo para la imagen capturada original (ej. 200x150)
+      let canvasProcessed = document.getElementById("canvas-processed"); // Lienzo para mostrar la imagen procesada (ej. 140x140)
+      let predictBtn = document.getElementById("predict");
+      let startWebcamBtn = document.getElementById("start-webcam");
+      let captureBtn = document.getElementById("capture");
+      let resultText = document.getElementById("result-text");
+      let predictionBars = document.getElementById("prediction-bars");
+      let statusMessage = document.getElementById("status-message");
+      let thresholdSlider = document.getElementById("threshold");
+      let thresholdValue = document.getElementById("threshold-value");
+      let invertCheckbox = document.getElementById("invert");
+      let applySettingsBtn = document.getElementById("apply-settings");
+
+      // Imagen capturada guardada (ImageData de canvasInput)
+      let capturedImage = null;
+      // Canvas interno para la imagen procesada de 28x28
+      let internalProcessedCanvas28x28 = null;
+
+      const classNames = [
+        "Zero",
+        "One",
+        "Two",
+        "Three",
+        "Four",
+        "Five",
+        "Six",
+        "Seven",
+        "Eight",
+        "Nine",
+      ];
+
+      // Eventos de configuración
+      thresholdSlider.addEventListener("input", function () {
+        thresholdValue.textContent = this.value;
+        // No es necesario reprocesar aquí automáticamente, el botón "Aplicar" lo hará.
+      });
+
+      invertCheckbox.addEventListener("change", function () {
+        // No es necesario reprocesar aquí automáticamente, el botón "Aplicar" lo hará.
+      });
+
+      applySettingsBtn.addEventListener("click", function () {
+        if (capturedImage) {
+          processImage();
+          statusMessage.textContent =
+            "Estado: Configuración aplicada. Imagen reprocesada.";
+        } else {
+          statusMessage.textContent =
+            "Estado: No hay imagen capturada para procesar.";
+        }
+      });
+
+      // Cargar el modelo
+      async function loadModel() {
+        try {
+          model = await tf.loadLayersModel("./modelo_entrenado.json"); // Asegúrate que esta ruta sea correcta
+          console.log("Modelo cargado correctamente");
+          statusMessage.textContent =
+            "Estado: Modelo cargado. Listo para iniciar webcam.";
+          // alert("Modelo cargado correctamente"); // Descomentar para prueba si es necesario
+        } catch (error) {
+          console.error("Error al cargar el modelo:", error);
+          statusMessage.textContent =
+            "Estado: Error al cargar el modelo. " + error.message;
+          alert("Error al cargar el modelo: " + error.message);
+        }
+      }
+
+      // Iniciar la webcam
+      startWebcamBtn.addEventListener("click", async () => {
+        try {
+          statusMessage.textContent =
+            "Estado: Solicitando acceso a la webcam...";
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: "environment",
+              width: { ideal: 400 },
+              height: { ideal: 300 },
+            },
+            audio: false,
+          });
+
+          video.srcObject = stream;
+          streaming = true;
+          startWebcamBtn.disabled = true;
+          captureBtn.disabled = false;
+          statusMessage.textContent =
+            "Estado: Webcam activa. Ahora puedes capturar una imagen.";
+        } catch (error) {
+          console.error("Error al acceder a la webcam:", error);
+          statusMessage.textContent =
+            "Estado: Error al acceder a la webcam. " + error.message;
+          alert("No se pudo acceder a la webcam: " + error.message);
+        }
+      });
+
+      // Capturar imagen
+      captureBtn.addEventListener("click", () => {
+        if (streaming) {
+          const context = canvasInput.getContext("2d");
+          canvasInput.width = 200; // Redefinir por si acaso, aunque ya está en HTML
+          canvasInput.height = 150;
+          // Dibuja el frame actual del video en canvasInput
+          context.drawImage(
+            video,
+            0,
+            0,
+            video.videoWidth,
+            video.videoHeight, // Coordenadas y tamaño del fuente (video)
+            0,
+            0,
+            canvasInput.width,
+            canvasInput.height, // Coordenadas y tamaño del destino (canvasInput)
+          );
+
+          // Guardar la ImageData de la imagen capturada en canvasInput
+          capturedImage = context.getImageData(
+            0,
+            0,
+            canvasInput.width,
+            canvasInput.height,
+          );
+
+          processImage(); // Procesar la imagen inmediatamente después de capturar
+
+          predictBtn.disabled = false;
+          statusMessage.textContent =
+            "Estado: Imagen capturada y procesada. Puedes predecir.";
+        }
+      });
+
+      // Procesar la imagen para que sea similar a los datos MNIST
+      function processImage() {
+        if (!capturedImage) {
+          console.log("No capturedImage to process.");
+          statusMessage.textContent =
+            "Estado: No hay imagen capturada para procesar.";
+          return;
+        }
+
+        // canvasInput (ej. 200x150) es la fuente para el procesamiento
+        const sourceCanvasForProcessing = canvasInput;
+
+        const size = 28; // Tamaño MNIST
+
+        // Asegurar que el canvas interno de 28x28 exista
+        if (!internalProcessedCanvas28x28) {
+          internalProcessedCanvas28x28 = document.createElement("canvas");
+          internalProcessedCanvas28x28.width = size;
+          internalProcessedCanvas28x28.height = size;
+        }
+        const scaledContext28x28 =
+          internalProcessedCanvas28x28.getContext("2d");
+
+        // 1. Escalar la imagen desde sourceCanvasForProcessing al canvas interno de 28x28
+        scaledContext28x28.drawImage(
+          sourceCanvasForProcessing,
+          0,
+          0,
+          sourceCanvasForProcessing.width,
+          sourceCanvasForProcessing.height,
+          0,
+          0,
+          size,
+          size,
+        );
+
+        // 2. Obtener los datos de píxeles de la imagen escalada de 28x28
+        const imageData28x28 = scaledContext28x28.getImageData(
+          0,
+          0,
+          size,
+          size,
+        );
+        const data = imageData28x28.data;
+
+        // 3. Procesar estos píxeles: escala de grises, inversión, umbral
+        const currentThreshold = parseInt(thresholdSlider.value);
+        const currentInvert = invertCheckbox.checked;
+
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const grayscale = 0.299 * r + 0.587 * g + 0.114 * b;
+
+          let value = grayscale;
+          if (currentInvert) {
+            value = 255 - value; // Invertir: números claros sobre fondo oscuro
+          }
+
+          // Aplicar umbral: convierte a blanco (255) o negro (0)
+          value = value > currentThreshold ? 255 : 0;
+
+          data[i] = value; // Rojo
+          data[i + 1] = value; // Verde
+          data[i + 2] = value; // Azul
+          data[i + 3] = 255; // Alfa (totalmente opaco)
+        }
+
+        // 4. Poner los datos de píxeles modificados de nuevo en el canvas interno de 28x28
+        scaledContext28x28.putImageData(imageData28x28, 0, 0);
+
+        // 5. Mostrar la imagen procesada de 28x28 en el canvas de visualización más grande (`canvasProcessed`)
+        const displayProcessedContext = canvasProcessed.getContext("2d");
+        displayProcessedContext.fillStyle = "black"; // Fondo negro para el canvas de visualización
+        displayProcessedContext.fillRect(
+          0,
+          0,
+          canvasProcessed.width,
+          canvasProcessed.height,
+        );
+        displayProcessedContext.imageSmoothingEnabled = false; // Para ver los píxeles nítidos
+        displayProcessedContext.drawImage(
+          internalProcessedCanvas28x28, // Fuente: nuestro canvas procesado de 28x28
+          0,
+          0,
+          size,
+          size, // Rectángulo fuente (completo 28x28)
+          0,
+          0,
+          canvasProcessed.width,
+          canvasProcessed.height, // Rectángulo destino (escalado para visualización)
+        );
+        // console.log("Imagen procesada. Umbral:", currentThreshold, "Invertir:", currentInvert);
+      }
+
+      // Realizar la predicción
+      predictBtn.addEventListener("click", async () => {
+        if (!model) {
+          alert(
+            "El modelo no está cargado. Por favor, espera a que se cargue o recarga la página.",
+          );
+          return;
+        }
+        if (!internalProcessedCanvas28x28) {
+          alert(
+            "No hay imagen procesada para predecir. Captura y procesa una imagen primero.",
+          );
+          statusMessage.textContent =
+            "Estado: No hay imagen procesada. Captura primero.";
+          return;
+        }
+
+        statusMessage.textContent = "Estado: Realizando predicción...";
+        try {
+          await tf.tidy(() => {
+            // Usar await si hay operaciones asíncronas dentro de tidy
+            // Usar el canvas interno de 28x28 directamente
+            let tensor = tf.browser
+              .fromPixels(internalProcessedCanvas28x28, 1) // 1 canal (escala de grises)
+              .toFloat()
+              .div(tf.scalar(255.0)) // Normalizar a [0, 1]
+              .expandDims(0); // Añadir dimensión de batch: [1, 28, 28, 1]
+
+            console.log("Tensor de entrada para predicción:", tensor.shape);
+            // Para depuración, puedes imprimir algunos valores del tensor:
+            // console.log("Min/Max del tensor:", tensor.min().dataSync()[0], tensor.max().dataSync()[0]);
+            // tensor.print(); // Imprime el tensor a la consola
+
+            const predictions = model.predict(tensor);
+            const values = predictions.dataSync(); // Array de probabilidades
+            // console.log("Valores de predicción:", values);
+
+            let maxIndex = 0;
+            let maxValue = values[0];
+            for (let i = 1; i < values.length; i++) {
+              if (values[i] > maxValue) {
+                maxIndex = i;
+                maxValue = values[i];
+              }
+            }
+
+            resultText.textContent = `Resultado: ${classNames[maxIndex]} (${maxIndex})`;
+            updatePredictionBars(values);
+            statusMessage.textContent = `Estado: Predicción completada - ${classNames[maxIndex]}.`;
+          });
+        } catch (error) {
+          console.error("Error al realizar la predicción:", error);
+          statusMessage.textContent = "Estado: Error en la predicción.";
+          alert("Error al realizar la predicción: " + error.message);
+        }
+      });
+
+      // Actualizar las barras de predicción
+      function updatePredictionBars(probabilities) {
+        predictionBars.innerHTML = ""; // Limpiar barras anteriores
+        for (let i = 0; i < probabilities.length; i++) {
+          const probability = probabilities[i] * 100;
+          const bar = document.createElement("div");
+          bar.className = "prediction-bar";
+          const label = document.createElement("div");
+          label.className = "digit-label";
+          label.textContent = i;
+          const probBar = document.createElement("div");
+          probBar.className = "probability-bar";
+          const fill = document.createElement("div");
+          fill.className = "probability-fill";
+          fill.style.width = `${probability}%`;
+          const value = document.createElement("div");
+          value.className = "probability-value";
+          value.textContent = `${probability.toFixed(2)}%`;
+          probBar.appendChild(fill);
+          probBar.appendChild(value);
+          bar.appendChild(label);
+          bar.appendChild(probBar);
+          predictionBars.appendChild(bar);
+        }
+      }
+
+      // Inicializar la aplicación
+      async function init() {
+        captureBtn.disabled = true;
+        predictBtn.disabled = true;
+        statusMessage.textContent = "Estado: Cargando el modelo...";
+        await loadModel();
+        // El mensaje de estado se actualiza dentro de loadModel()
+      }
+
+      window.addEventListener("load", init);
+    </script>
+  </body>
+</html>
