@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reconocimiento de Dígitos Manuscritos</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        font-family: sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        margin-top: 20px;
+        background-color: #f0f0f0;
+      }
+      #container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        background-color: white;
+        padding: 30px;
+        border-radius: 10px;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+      }
+      video,
+      #canvas-capture,
+      #canvas-preview {
+        border: 1px solid #ddd;
+        margin-bottom: 10px;
+        border-radius: 5px;
+      }
+      #canvas-preview {
+        width: 140px; /* 28x28 * 5 para mejor visualización */
+        height: 140px;
+        border: 2px solid black;
+        image-rendering: pixelated; /* Para que se vean los píxeles */
+      }
+      #prediction-output {
+        font-size: 2em;
+        font-weight: bold;
+        color: #333;
+        margin-top: 10px;
+      }
+      #layer-visualization {
+        margin-top: 20px;
+        padding: 15px;
+        border: 1px solid #ccc;
+        border-radius: 5px;
+        width: 100%;
+        max-width: 600px;
+        text-align: center;
+      }
+      .layer {
+        background-color: #e9ecef;
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 5px;
+        font-size: 0.9em;
+      }
+      .arrow {
+        font-size: 1.5em;
+        margin: 5px 0;
+        color: #6c757d;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="container">
+      <h1>Reconocimiento de Dígitos con Webcam</h1>
+      <p>Muestra un número escrito a mano (0-9) a la cámara.</p>
+      <p>Intenta que el número esté bien centrado y sea claro.</p>
+
+      <video id="webcam" width="320" height="240" autoplay playsinline></video>
+      <button id="capture-button" class="btn btn-primary mt-2 mb-2">
+        Capturar y Predecir
+      </button>
+
+      <div>
+        <label for="canvas-preview">Previsualización (28x28 procesada):</label
+        ><br />
+        <canvas id="canvas-preview" width="28" height="28"></canvas>
+      </div>
+      <div id="prediction-output">Esperando predicción...</div>
+
+      <div id="layer-visualization">
+        <h4>Visualización Conceptual de Capas</h4>
+        <div class="layer" id="layer-input">Entrada (Imagen 28x28x1)</div>
+        <div class="arrow">⬇️</div>
+        <div class="layer" id="layer-conv2d_1">
+          Capa Convolucional 1 (Ej: 8 filtros 3x3, ReLU)
+        </div>
+        <div class="arrow">⬇️</div>
+        <div class="layer" id="layer-maxpooling2d_1">
+          Capa MaxPooling 1 (Ej: 2x2)
+        </div>
+        <div class="arrow">⬇️</div>
+        <div class="layer" id="layer-conv2d_2">
+          Capa Convolucional 2 (Ej: 16 filtros 3x3, ReLU)
+        </div>
+        <div class="arrow">⬇️</div>
+        <div class="layer" id="layer-maxpooling2d_2">
+          Capa MaxPooling 2 (Ej: 2x2)
+        </div>
+        <div class="arrow">⬇️</div>
+        <div class="layer" id="layer-flatten">Capa Flatten</div>
+        <div class="arrow">⬇️</div>
+        <div class="layer" id="layer-dense">
+          Capa Densa (Ej: 128 neuronas, ReLU)
+        </div>
+        <div class="arrow">⬇️</div>
+        <div class="layer" id="layer-output">
+          Capa de Salida (10 neuronas, Softmax) -> Dígito
+        </div>
+      </div>
+    </div>
+
+    <canvas
+      id="canvas-capture"
+      width="320"
+      height="240"
+      style="display: none"
+    ></canvas>
+
+    <script>
+      const video = document.getElementById("webcam");
+      const captureButton = document.getElementById("capture-button");
+      const canvasCapture = document.getElementById("canvas-capture");
+      const canvasPreview = document.getElementById("canvas-preview");
+      const predictionOutput = document.getElementById("prediction-output");
+      const ctxCapture = canvasCapture.getContext("2d");
+      const ctxPreview = canvasPreview.getContext("2d");
+
+      let model;
+      const MODEL_URL =
+        "https://storage.googleapis.com/tfjs-models/tfjs/mnist_transfer_cnn_v1/model.json"; // Modelo pre-entrenado simple para MNIST
+
+      // Función para cargar el modelo
+      async function loadModel() {
+        predictionOutput.innerText = "Cargando modelo...";
+        try {
+          model = await tf.loadLayersModel(MODEL_URL);
+          // Calentamiento del modelo (opcional, pero puede mejorar la primera predicción)
+          const zeros = tf.zeros([1, 28, 28, 1]);
+          model.predict(zeros).dispose();
+          zeros.dispose();
+          predictionOutput.innerText = "Modelo cargado. Muestra un número.";
+          captureButton.disabled = false;
+          console.log("Modelo cargado exitosamente.");
+          updateLayerInfo(model); // Actualizar visualización con info del modelo real
+        } catch (error) {
+          console.error("Error al cargar el modelo:", error);
+          predictionOutput.innerText =
+            "Error al cargar el modelo. Revisa la consola.";
+        }
+      }
+
+      // Función para actualizar la visualización de capas (conceptual)
+      function updateLayerInfo(loadedModel) {
+        if (!loadedModel) return;
+        try {
+          // Esto es conceptual. Para un modelo específico, necesitarías parsear `loadedModel.layers`
+          // y extraer información relevante. El modelo de ejemplo es una CNN simple.
+          // Aquí solo mostramos un ejemplo de cómo podrías hacerlo si conoces la estructura.
+          // Para este modelo específico de MNIST no es tan directo obtener los nombres exactos
+          // y parámetros de forma sencilla sin inspeccionar el `model.json` o `model.summary()` en Python.
+          // Por ahora, mantenemos la visualización conceptual, pero puedes adaptarla.
+
+          const layers = loadedModel.layers;
+          if (layers.length > 6) {
+            // Asumiendo una estructura similar a la conceptual
+            document.getElementById("layer-input").textContent =
+              `Entrada (Imagen ${layers[0].inputShape.slice(1).join("x")})`;
+            // Ejemplo de cómo podrías intentar obtener info de las capas (puede variar mucho según el modelo)
+            // Esto es una simplificación y puede no coincidir exactamente con el modelo de ejemplo específico de TF Hub.
+            // Es mejor revisar la arquitectura del modelo que estás cargando.
+            // Por simplicidad, mantenemos los textos genéricos si la introspección es compleja.
+          }
+
+          // Ejemplo de cómo podrías resaltar la capa activa durante la predicción (más avanzado)
+          // Por ahora, la visualización es estática.
+        } catch (e) {
+          console.warn(
+            "No se pudo actualizar la información detallada de las capas:",
+            e,
+          );
+        }
+      }
+
+      // Función para acceder a la webcam
+      async function setupWebcam() {
+        predictionOutput.innerText = "Configurando webcam...";
+        return new Promise((resolve, reject) => {
+          navigator.mediaDevices
+            .getUserMedia({ video: true })
+            .then((stream) => {
+              video.srcObject = stream;
+              video.addEventListener(
+                "loadeddata",
+                () => {
+                  predictionOutput.innerText =
+                    "Webcam lista. Cargando modelo...";
+                  resolve();
+                },
+                false,
+              );
+            })
+            .catch((err) => {
+              console.error("Error al acceder a la webcam:", err);
+              predictionOutput.innerText =
+                "Error al acceder a la webcam. Asegúrate de dar permiso.";
+              reject(err);
+            });
+        });
+      }
+
+      // Preprocesar la imagen
+      function preprocessImage(imageElement) {
+        // 1. Capturar el centro de la webcam (ej. un cuadrado de 200x200)
+        const targetSize =
+          Math.min(imageElement.width, imageElement.height) * 0.8; // 80% del lado más corto
+        const sx = (imageElement.width - targetSize) / 2;
+        const sy = (imageElement.height - targetSize) / 2;
+
+        // Crear un canvas temporal para el recorte y la escala de grises
+        const tempCanvas = document.createElement("canvas");
+        tempCanvas.width = 280; // Un tamaño intermedio mayor para mejor calidad al reducir
+        tempCanvas.height = 280;
+        const tempCtx = tempCanvas.getContext("2d");
+
+        // Dibujar la porción central de la webcam en el canvas temporal
+        tempCtx.drawImage(
+          imageElement,
+          sx,
+          sy,
+          targetSize,
+          targetSize,
+          0,
+          0,
+          280,
+          280,
+        );
+
+        // Convertir a escala de grises y mejorar contraste (simple)
+        const imageData = tempCtx.getImageData(0, 0, 280, 280);
+        const data = imageData.data;
+        for (let i = 0; i < data.length; i += 4) {
+          const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+          // Simple thresholding para mejorar contraste (blanco sobre negro)
+          // Los modelos MNIST suelen esperar dígitos blancos sobre fondo negro.
+          // La webcam probablemente dará un dígito oscuro sobre fondo claro.
+          // Necesitamos invertir y asegurar que el dígito sea "brillante".
+          const color = avg < 100 ? 255 : 0; // Si es oscuro (dígito), hacerlo blanco. Si es claro (fondo), hacerlo negro.
+          data[i] = color; // Rojo
+          data[i + 1] = color; // Verde
+          data[i + 2] = color; // Azul
+        }
+        tempCtx.putImageData(imageData, 0, 0);
+
+        // Dibujar en el canvas de previsualización (28x28)
+        // Esto también sirve como el canvas del que tomaremos los píxeles para el tensor
+        ctxPreview.imageSmoothingEnabled = false; // para ver los píxeles
+        ctxPreview.drawImage(tempCanvas, 0, 0, 280, 280, 0, 0, 28, 28);
+
+        // Crear el tensor desde el canvas de previsualización
+        let tensor = tf.browser
+          .fromPixels(canvasPreview, 1) // 1 canal (escala de grises)
+          .toFloat()
+          .div(tf.scalar(255.0)) // Normalizar a [0, 1]
+          .expandDims(0); // Añadir dimensión de batch: [1, 28, 28, 1]
+
+        return tensor;
+      }
+
+      // Función para capturar y predecir
+      captureButton.addEventListener("click", async () => {
+        if (!model) {
+          predictionOutput.innerText = "Modelo no cargado aún.";
+          return;
+        }
+        predictionOutput.innerText = "Procesando...";
+
+        // 1. Dibujar el frame actual de la webcam en el canvas de captura
+        ctxCapture.drawImage(
+          video,
+          0,
+          0,
+          canvasCapture.width,
+          canvasCapture.height,
+        );
+
+        // 2. Preprocesar la imagen
+        const tensor = preprocessImage(canvasCapture); // Usar el canvas de captura como fuente
+
+        // 3. Realizar la predicción
+        // Simular activación de capas (resaltado)
+        document.getElementById("layer-input").style.backgroundColor =
+          "#add8e6";
+
+        // Pequeña demora para simular el paso por las capas visualmente
+        setTimeout(
+          () =>
+            (document.getElementById("layer-conv2d_1").style.backgroundColor =
+              "#add8e6"),
+          100,
+        );
+        setTimeout(
+          () =>
+            (document.getElementById(
+              "layer-maxpooling2d_1",
+            ).style.backgroundColor = "#add8e6"),
+          200,
+        );
+        setTimeout(
+          () =>
+            (document.getElementById("layer-conv2d_2").style.backgroundColor =
+              "#add8e6"),
+          300,
+        );
+        setTimeout(
+          () =>
+            (document.getElementById(
+              "layer-maxpooling2d_2",
+            ).style.backgroundColor = "#add8e6"),
+          400,
+        );
+        setTimeout(
+          () =>
+            (document.getElementById("layer-flatten").style.backgroundColor =
+              "#add8e6"),
+          500,
+        );
+        setTimeout(
+          () =>
+            (document.getElementById("layer-dense").style.backgroundColor =
+              "#add8e6"),
+          600,
+        );
+        setTimeout(
+          () =>
+            (document.getElementById("layer-output").style.backgroundColor =
+              "#add8e6"),
+          700,
+        );
+
+        const prediction = model.predict(tensor);
+        const probabilities = await prediction.data();
+        const predictedDigit = probabilities.indexOf(
+          Math.max(...probabilities),
+        );
+
+        predictionOutput.innerText = `Predicción: ${predictedDigit}`;
+        console.log("Probabilidades:", probabilities);
+
+        // Limpiar tensor para liberar memoria
+        tensor.dispose();
+        prediction.dispose();
+
+        // Resetear colores de capas después de un tiempo
+        setTimeout(() => {
+          document
+            .querySelectorAll(".layer")
+            .forEach((el) => (el.style.backgroundColor = "#e9ecef"));
+        }, 1500);
+      });
+
+      // Iniciar todo
+      async function main() {
+        captureButton.disabled = true;
+        await setupWebcam();
+        await loadModel();
+      }
+
+      main();
+    </script>
+  </body>
+</html>
